@@ -4,6 +4,18 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 ROOT_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+
+import argparse
+import logging
+import os
+import os.path as osp
+
+from data.segm_attr_dataset import DeepFashionAttrSegmDataset
+from models import create_model
+from utils.logger import MessageLogger, get_root_logger, init_tb_logger
+from utils.options import dict2str, dict_to_nonedict, parse
+from utils.util import make_exp_dirs
+
 import time
 import json
 import numpy as np
@@ -29,7 +41,7 @@ def train(opt):
     cuda = torch.device('cuda:%d' % opt.gpu_id)
 
     train_dataset = TrainDataset(opt, phase='train')
-    test_dataset = TrainDataset(opt, phase='test')
+    # test_dataset = TrainDataset(opt, phase='test')
 
     projection_mode = train_dataset.projection_mode
 
@@ -41,22 +53,16 @@ def train(opt):
     print('train data size: ', len(train_data_loader))
 
     # NOTE: batch size should be 1 and use all the points for evaluation
-    test_data_loader = DataLoader(test_dataset,
-                                  batch_size=1, shuffle=False,
-                                  num_workers=opt.num_threads, pin_memory=opt.pin_memory)
-    print('test data size: ', len(test_data_loader))
+    # test_data_loader = DataLoader(test_dataset,
+    #                               batch_size=1, shuffle=False,
+    #                               num_workers=opt.num_threads, pin_memory=opt.pin_memory)
+    # print('test data size: ', len(test_data_loader))
 
     # create net
     netG = HGPIFuNet(opt, projection_mode).to(device=cuda)
     optimizerG = torch.optim.RMSprop(netG.parameters(), lr=opt.learning_rate, momentum=0, weight_decay=0)
     lr = opt.learning_rate
     print('Using Network: ', netG.name)
-    
-    def set_train():
-        netG.train()
-
-    def set_eval():
-        netG.eval()
 
     # load checkpoints
     if opt.load_netG_checkpoint_path is not None:
@@ -80,9 +86,23 @@ def train(opt):
     with open(opt_log, 'w') as outfile:
         outfile.write(json.dumps(vars(opt), indent=2))
 
+    model = create_model(opt)
+
+    data_time, iter_time = 0, 0
+    current_iter = 0
+
+    def set_train():
+        netG.train()
+        model.train()
+
+    def set_eval():
+        netG.eval()
+        model.eval()
+
     # training
     start_epoch = 0 if not opt.continue_train else max(opt.resume_epoch,0)
     for epoch in range(start_epoch, opt.num_epoch):
+        lr = model.update_learning_rate(epoch, current_iter)
         epoch_start_time = time.time()
 
         set_train()
@@ -91,11 +111,16 @@ def train(opt):
             iter_start_time = time.time()
 
             # retrieve the data
-            image_tensor = train_data['img'].to(device=cuda)
+            # image_tensor = train_data['img'].to(device=cuda)
+
+            model.feed_data(train_data)
+            model.optimize_parameters()
+
+            image_tensor = model.img_feats
             calib_tensor = train_data['calib'].to(device=cuda)
             sample_tensor = train_data['samples'].to(device=cuda)
 
-            image_tensor, calib_tensor = reshape_multiview_tensors(image_tensor, calib_tensor)
+            # image_tensor, calib_tensor = reshape_multiview_tensors(image_tensor, calib_tensor)
 
             if opt.num_views > 1:
                 sample_tensor = reshape_sample_tensor(sample_tensor, opt.num_views)
@@ -136,47 +161,48 @@ def train(opt):
         lr = adjust_learning_rate(optimizerG, epoch, lr, opt.schedule, opt.gamma)
 
         #### test
-        with torch.no_grad():
-            set_eval()
+        # with torch.no_grad():
+        #     set_eval()
+        #
+        #     if not opt.no_num_eval:
+        #         test_losses = {}
+        #         print('calc error (test) ...')
+        #         test_errors = calc_error(opt, netG, cuda, test_dataset, 100)
+        #         print('eval test MSE: {0:06f} IOU: {1:06f} prec: {2:06f} recall: {3:06f}'.format(*test_errors))
+        #         MSE, IOU, prec, recall = test_errors
+        #         test_losses['MSE(test)'] = MSE
+        #         test_losses['IOU(test)'] = IOU
+        #         test_losses['prec(test)'] = prec
+        #         test_losses['recall(test)'] = recall
+        #
+        #         print('calc error (train) ...')
+        #         train_dataset.is_train = False
+        #         train_errors = calc_error(opt, netG, cuda, train_dataset, 100)
+        #         train_dataset.is_train = True
+        #         print('eval train MSE: {0:06f} IOU: {1:06f} prec: {2:06f} recall: {3:06f}'.format(*train_errors))
+        #         MSE, IOU, prec, recall = train_errors
+        #         test_losses['MSE(train)'] = MSE
+        #         test_losses['IOU(train)'] = IOU
+        #         test_losses['prec(train)'] = prec
+        #         test_losses['recall(train)'] = recall
+        #
+        #     if not opt.no_gen_mesh:
+        #         print('generate mesh (test) ...')
+        #         for gen_idx in tqdm(range(opt.num_gen_mesh_test)):
+        #             test_data = random.choice(test_dataset)
+        #             save_path = '%s/%s/test_eval_epoch%d_%s.obj' % (
+        #                 opt.results_path, opt.name, epoch, test_data['name'])
+        #             gen_mesh(opt, netG, cuda, test_data, save_path)
+        #
+        #         print('generate mesh (train) ...')
+        #         train_dataset.is_train = False
+        #         for gen_idx in tqdm(range(opt.num_gen_mesh_test)):
+        #             train_data = random.choice(train_dataset)
+        #             save_path = '%s/%s/train_eval_epoch%d_%s.obj' % (
+        #                 opt.results_path, opt.name, epoch, train_data['name'])
+        #             gen_mesh(opt, netG, cuda, train_data, save_path)
+        #         train_dataset.is_train = True
 
-            if not opt.no_num_eval:
-                test_losses = {}
-                print('calc error (test) ...')
-                test_errors = calc_error(opt, netG, cuda, test_dataset, 100)
-                print('eval test MSE: {0:06f} IOU: {1:06f} prec: {2:06f} recall: {3:06f}'.format(*test_errors))
-                MSE, IOU, prec, recall = test_errors
-                test_losses['MSE(test)'] = MSE
-                test_losses['IOU(test)'] = IOU
-                test_losses['prec(test)'] = prec
-                test_losses['recall(test)'] = recall
-
-                print('calc error (train) ...')
-                train_dataset.is_train = False
-                train_errors = calc_error(opt, netG, cuda, train_dataset, 100)
-                train_dataset.is_train = True
-                print('eval train MSE: {0:06f} IOU: {1:06f} prec: {2:06f} recall: {3:06f}'.format(*train_errors))
-                MSE, IOU, prec, recall = train_errors
-                test_losses['MSE(train)'] = MSE
-                test_losses['IOU(train)'] = IOU
-                test_losses['prec(train)'] = prec
-                test_losses['recall(train)'] = recall
-
-            if not opt.no_gen_mesh:
-                print('generate mesh (test) ...')
-                for gen_idx in tqdm(range(opt.num_gen_mesh_test)):
-                    test_data = random.choice(test_dataset)
-                    save_path = '%s/%s/test_eval_epoch%d_%s.obj' % (
-                        opt.results_path, opt.name, epoch, test_data['name'])
-                    gen_mesh(opt, netG, cuda, test_data, save_path)
-
-                print('generate mesh (train) ...')
-                train_dataset.is_train = False
-                for gen_idx in tqdm(range(opt.num_gen_mesh_test)):
-                    train_data = random.choice(train_dataset)
-                    save_path = '%s/%s/train_eval_epoch%d_%s.obj' % (
-                        opt.results_path, opt.name, epoch, train_data['name'])
-                    gen_mesh(opt, netG, cuda, train_data, save_path)
-                train_dataset.is_train = True
 
 
 if __name__ == '__main__':

@@ -13,6 +13,7 @@ import logging
 log = logging.getLogger('trimesh')
 log.setLevel(40)
 
+
 def load_trimesh(root_dir):
     folders = os.listdir(root_dir)
     meshs = {}
@@ -21,6 +22,7 @@ def load_trimesh(root_dir):
         meshs[sub_name] = trimesh.load(os.path.join(root_dir, f, '%s_100k.obj' % sub_name))
 
     return meshs
+
 
 def save_samples_truncted_prob(fname, points, prob):
     '''
@@ -52,7 +54,8 @@ class TrainDataset(Dataset):
     def modify_commandline_options(parser, is_train):
         return parser
 
-    def __init__(self, opt, phase='train'):
+    def __init__(self, opt, downsample_factor=2,
+                 xflip=False, phase='train'):
         self.opt = opt
         self.projection_mode = 'orthogonal'
 
@@ -66,6 +69,18 @@ class TrainDataset(Dataset):
         self.UV_RENDER = os.path.join(self.root, 'UV_RENDER')
         self.UV_POS = os.path.join(self.root, 'UV_POS')
         self.OBJ = os.path.join(self.root, 'GEO', 'OBJ')
+        self.SEG = os.path.join(self.root, 'SEG')
+        self.POSE = os.path.join(self.root, 'POSE')
+        self.ANN = os.path.join(self.root, 'ANN')
+
+
+        self._image_fnames = []
+        self.upper_fused_attrs = []
+        self.lower_fused_attrs = []
+        self.outer_fused_attrs = []
+
+        self.downsample_factor = downsample_factor
+        self.xflip = xflip
 
         self.B_MIN = np.array([-128, -28, -128])
         self.B_MAX = np.array([128, 228, 128])
@@ -78,7 +93,7 @@ class TrainDataset(Dataset):
         self.num_sample_inout = self.opt.num_sample_inout
         self.num_sample_color = self.opt.num_sample_color
 
-        self.yaw_list = list(range(0,360,1))
+        self.yaw_list = list(range(0, 360, 1))
         self.pitch_list = [0]
         self.subjects = self.get_subjects()
 
@@ -97,6 +112,95 @@ class TrainDataset(Dataset):
 
         self.mesh_dic = load_trimesh(self.OBJ)
 
+        # load attributes
+        assert os.path.exists(f'{self.ANN}/upper_fused.txt')
+        for idx, row in enumerate(
+                open(os.path.join(f'{self.ANN}/upper_fused.txt'), 'r')):
+            annotations = row.split()
+            self._image_fnames.append(annotations[0])
+            # assert self._image_fnames[idx] == annotations[0]
+            self.upper_fused_attrs.append(int(annotations[1]))
+
+        assert len(self._image_fnames) == len(self.upper_fused_attrs)
+
+        assert os.path.exists(f'{self.ANN}/lower_fused.txt')
+        for idx, row in enumerate(
+                open(os.path.join(f'{self.ANN}/lower_fused.txt'), 'r')):
+            annotations = row.split()
+            assert self._image_fnames[idx] == annotations[0]
+            self.lower_fused_attrs.append(int(annotations[1]))
+
+        assert len(self._image_fnames) == len(self.lower_fused_attrs)
+
+        assert os.path.exists(f'{self.ANN}/outer_fused.txt')
+        for idx, row in enumerate(
+                open(os.path.join(f'{self.ANN}/outer_fused.txt'), 'r')):
+            annotations = row.split()
+            assert self._image_fnames[idx] == annotations[0]
+            self.outer_fused_attrs.append(int(annotations[1]))
+
+        assert len(self._image_fnames) == len(self.outer_fused_attrs)
+
+        # remove the overlapping item between upper cls and lower cls
+        # cls 21 can appear with upper clothes
+        # cls 4 can appear with lower clothes
+        self.upper_cls = [1., 4.]
+        self.lower_cls = [3., 5., 21.]
+        self.outer_cls = [2.]
+        self.other_cls = [
+            11., 18., 7., 8., 9., 10., 12., 16., 17., 19., 20., 22., 23., 15.,
+            14., 13., 0., 6.
+        ]
+
+    def open_file(self, path_prefix, fname):
+        return open(os.path.join(path_prefix, fname), 'rb')
+
+    def get_raw_image(self, raw_idx):
+        fname = self._image_fnames[raw_idx]
+        with self._open_file(self._img_path, fname) as f:
+            image = Image.open(f)
+            if self.downsample_factor != 1:
+                width, height = image.size
+                width = width // self.downsample_factor
+                height = height // self.downsample_factor
+                image = image.resize(
+                    size=(width, height), resample=Image.LANCZOS)
+            image = np.array(image)
+        if image.ndim == 2:
+            image = image[:, :, np.newaxis]  # HW => HWC
+        image = image.transpose(2, 0, 1)  # HWC => CHW
+        return image
+
+    def get_densepose(self, raw_idx):
+        fname = self._image_fnames[raw_idx]
+        fname = f'{fname[:-4]}_densepose.png'
+        with self._open_file(self.POSE, fname) as f:
+            densepose = Image.open(f)
+            if self.downsample_factor != 1:
+                width, height = densepose.size
+                width = width // self.downsample_factor
+                height = height // self.downsample_factor
+                densepose = densepose.resize(
+                    size=(width, height), resample=Image.NEAREST)
+            # channel-wise IUV order, [3, H, W]
+            densepose = np.array(densepose)[:, :, 2:].transpose(2, 0, 1)
+        return densepose.astype(np.float32)
+
+    def get_segm(self, raw_idx):
+        fname = self._image_fnames[raw_idx]
+        fname = f'{fname[:-4]}_segm.png'
+        with self._open_file(self.SEG, fname) as f:
+            segm = Image.open(f)
+            if self.downsample_factor != 1:
+                width, height = segm.size
+                width = width // self.downsample_factor
+                height = height // self.downsample_factor
+                segm = segm.resize(
+                    size=(width, height), resample=Image.NEAREST)
+            segm = np.array(segm)
+        segm = segm[:, :, np.newaxis].transpose(2, 0, 1)
+        return segm.astype(np.float32)
+
     def get_subjects(self):
         all_subjects = os.listdir(self.RENDER)
         var_subjects = np.loadtxt(os.path.join(self.root, 'val.txt'), dtype=str)
@@ -108,8 +212,10 @@ class TrainDataset(Dataset):
         else:
             return sorted(list(var_subjects))
 
+    # def __len__(self):
+    #     return len(self.subjects) * len(self.yaw_list) * len(self.pitch_list)
     def __len__(self):
-        return len(self.subjects) * len(self.yaw_list) * len(self.pitch_list)
+        return len(self._image_fnames)
 
     def get_render(self, subject, num_views, yid=0, pid=0, random_sample=False):
         '''
@@ -128,11 +234,11 @@ class TrainDataset(Dataset):
         # The ids are an even distribution of num_views around view_id
         view_ids = [self.yaw_list[(yid + len(self.yaw_list) // num_views * offset) % len(self.yaw_list)]
                     for offset in range(num_views)]
-        if random_sample:
-            view_ids = np.random.choice(self.yaw_list, num_views, replace=False)
+        # if random_sample:
+        #     view_ids = np.random.choice(self.yaw_list, num_views, replace=False)
 
         calib_list = []
-        render_list = []
+        # render_list = []
         mask_list = []
         extrinsic_list = []
 
@@ -183,7 +289,7 @@ class TrainDataset(Dataset):
                 # random flip
                 if self.opt.random_flip and np.random.rand() > 0.5:
                     scale_intrinsic[0, 0] *= -1
-                    render = transforms.RandomHorizontalFlip(p=1.0)(render)
+                    # render = transforms.RandomHorizontalFlip(p=1.0)(render)
                     mask = transforms.RandomHorizontalFlip(p=1.0)(mask)
 
                 # random scale
@@ -191,7 +297,7 @@ class TrainDataset(Dataset):
                     rand_scale = random.uniform(0.9, 1.1)
                     w = int(rand_scale * w)
                     h = int(rand_scale * h)
-                    render = render.resize((w, h), Image.BILINEAR)
+                    # render = render.resize((w, h), Image.BILINEAR)
                     mask = mask.resize((w, h), Image.NEAREST)
                     scale_intrinsic *= rand_scale
                     scale_intrinsic[3, 3] = 1
@@ -212,15 +318,15 @@ class TrainDataset(Dataset):
                 x1 = int(round((w - tw) / 2.)) + dx
                 y1 = int(round((h - th) / 2.)) + dy
 
-                render = render.crop((x1, y1, x1 + tw, y1 + th))
+                # render = render.crop((x1, y1, x1 + tw, y1 + th))
                 mask = mask.crop((x1, y1, x1 + tw, y1 + th))
 
-                render = self.aug_trans(render)
+                # render = self.aug_trans(render)
 
                 # random blur
-                if self.opt.aug_blur > 0.00001:
-                    blur = GaussianBlur(np.random.uniform(0, self.opt.aug_blur))
-                    render = render.filter(blur)
+                # if self.opt.aug_blur > 0.00001:
+                    # blur = GaussianBlur(np.random.uniform(0, self.opt.aug_blur))
+                    # render = render.filter(blur)
 
             intrinsic = np.matmul(trans_intrinsic, np.matmul(uv_intrinsic, scale_intrinsic))
             calib = torch.Tensor(np.matmul(intrinsic, extrinsic)).float()
@@ -230,15 +336,15 @@ class TrainDataset(Dataset):
             mask = transforms.ToTensor()(mask).float()
             mask_list.append(mask)
 
-            render = self.to_tensor(render)
-            render = mask.expand_as(render) * render
+            # render = self.to_tensor(render)
+            # render = mask.expand_as(render) * render
 
-            render_list.append(render)
+            # render_list.append(render)
             calib_list.append(calib)
             extrinsic_list.append(extrinsic)
 
         return {
-            'img': torch.stack(render_list, dim=0),
+            # 'img': torch.stack(render_list, dim=0),
             'calib': torch.stack(calib_list, dim=0),
             'extrinsic': torch.stack(extrinsic_list, dim=0),
             'mask': torch.stack(mask_list, dim=0)
@@ -268,7 +374,8 @@ class TrainDataset(Dataset):
                         :self.num_sample_inout // 2] if nin > self.num_sample_inout // 2 else inside_points
         outside_points = outside_points[
                          :self.num_sample_inout // 2] if nin > self.num_sample_inout // 2 else outside_points[
-                                                                                               :(self.num_sample_inout - nin)]
+                                                                                               :(
+                                                                                                           self.num_sample_inout - nin)]
 
         samples = np.concatenate([inside_points, outside_points], 0).T
         labels = np.concatenate([np.ones((1, inside_points.shape[0])), np.zeros((1, outside_points.shape[0]))], 1)
@@ -278,14 +385,13 @@ class TrainDataset(Dataset):
 
         samples = torch.Tensor(samples).float()
         labels = torch.Tensor(labels).float()
-        
+
         del mesh
 
         return {
             'samples': samples,
             'labels': labels
         }
-
 
     def get_color_sampling(self, subject, yid, pid=0):
         yaw = self.yaw_list[yid]
@@ -344,10 +450,16 @@ class TrainDataset(Dataset):
     def get_item(self, index):
         # In case of a missing file or IO error, switch to a random sample instead
         # try:
-        sid = index % len(self.subjects)
-        tmp = index // len(self.subjects)
-        yid = tmp % len(self.yaw_list)
-        pid = tmp // len(self.yaw_list)
+        # sid = index % len(self.subjects)
+        # tmp = index // len(self.subjects)
+        # yid = tmp % len(self.yaw_list)
+        # pid = tmp // len(self.yaw_list)
+        image = self.get_raw_image(index)
+        pose = self.get_densepose(index)
+        segm = self.get_segm(index)
+
+        info = self._image_fnames[index].split('.')[0].split['_']
+        sid, yid, pid = int(info[0]), info[1], info[2]
 
         # name of the subject 'rp_xxxx_xxx'
         subject = self.subjects[sid]
@@ -360,14 +472,56 @@ class TrainDataset(Dataset):
             'b_min': self.B_MIN,
             'b_max': self.B_MAX,
         }
-        render_data = self.get_render(subject, num_views=self.num_views, yid=yid, pid=pid,
-                                        random_sample=self.opt.random_multiview)
-        res.update(render_data)
 
         if self.opt.num_sample_inout:
             sample_data = self.select_sampling_method(subject)
             res.update(sample_data)
-        
+
+        if self.xflip and random.random() > 0.5:
+            assert image.ndim == 3  # CHW
+            image = image[:, :, ::-1].copy()
+            pose = pose[:, :, ::-1].copy()
+            segm = segm[:, :, ::-1].copy()
+
+        image = torch.from_numpy(image)
+        segm = torch.from_numpy(segm)
+
+        upper_fused_attr = self.upper_fused_attrs[index]
+        lower_fused_attr = self.lower_fused_attrs[index]
+        outer_fused_attr = self.outer_fused_attrs[index]
+
+        # mask 0: denotes the common codebook,
+        # mask (attr + 1): denotes the texture-specific codebook
+        mask = torch.zeros_like(segm)
+        if upper_fused_attr != 17:
+            for cls in self.upper_cls:
+                mask[segm == cls] = upper_fused_attr + 1
+
+        if lower_fused_attr != 17:
+            for cls in self.lower_cls:
+                mask[segm == cls] = lower_fused_attr + 1
+
+        if outer_fused_attr != 17:
+            for cls in self.outer_cls:
+                mask[segm == cls] = outer_fused_attr + 1
+
+        pose = pose / 12. - 1
+        image = image / 127.5 - 1
+        return_dict = {
+            'image': image,
+            'densepose': pose,
+            'segm': segm,
+            'texture_mask': mask,
+            'img_name': self._image_fnames[index]
+        }
+
+        res.update(return_dict)
+        render_data = self.get_render(subject, num_views=self.num_views, yid=yid, pid=pid,
+                                      random_sample=self.opt.random_multiview)
+        res.update(render_data)
+
+
+
         # img = np.uint8((np.transpose(render_data['img'][0].numpy(), (1, 2, 0)) * 0.5 + 0.5)[:, :, ::-1] * 255.0)
         # rot = render_data['calib'][0,:3, :3]
         # trans = render_data['calib'][0,:3, 3:4]

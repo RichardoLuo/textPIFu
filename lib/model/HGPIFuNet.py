@@ -126,9 +126,10 @@ class HGPIFuNet(BasePIFuNet):
         
         return error
 
-    def forward(self, images, points, calibs, transforms=None, labels=None):
+    def forward(self, img_feats, points, calibs, transforms=None, labels=None):
         # Get image feature
-        self.filter(images)
+        self.im_feat_list = img_feats
+        # self.filter(images)
 
         # Phase 2: point query
         self.query(points=points, calibs=calibs, transforms=transforms, labels=labels)
