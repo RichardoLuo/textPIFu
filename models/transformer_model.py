@@ -309,14 +309,16 @@ class TransformerTextureAwareModel():
                                          self.gt_indices_list)
 
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+        # self.optimizer.zero_grad()
+        # loss.backward()
+        # self.optimizer.step()
 
         self.log_dict['loss'] = loss
         self.log_dict['vb_loss'] = vb_loss
 
         self._denoise_fn.eval()
+
+        return loss
 
     @torch.no_grad()
     def get_quantized_segm(self, segm):

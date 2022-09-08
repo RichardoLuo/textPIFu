@@ -114,7 +114,7 @@ def train(opt):
             # image_tensor = train_data['img'].to(device=cuda)
 
             model.feed_data(train_data)
-            model.optimize_parameters()
+            loss_th = model.optimize_parameters()
 
             image_tensor = model.img_feats
             calib_tensor = train_data['calib'].to(device=cuda)
@@ -129,9 +129,13 @@ def train(opt):
 
             res, error = netG.forward(image_tensor, sample_tensor, calib_tensor, labels=label_tensor)
 
+            combined_loss = loss_th + error
+
             optimizerG.zero_grad()
-            error.backward()
+            model.optimizer.zero_grad()
+            combined_loss.backward()
             optimizerG.step()
+            model.optimizer.step()
 
             iter_net_time = time.time()
             eta = ((iter_net_time - epoch_start_time) / (train_idx + 1)) * len(train_data_loader) - (
