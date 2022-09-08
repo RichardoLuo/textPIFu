@@ -155,9 +155,12 @@ class TrainDataset(Dataset):
     def open_file(self, path_prefix, fname):
         return open(os.path.join(path_prefix, fname), 'rb')
 
-    def get_raw_image(self, raw_idx):
-        fname = self._image_fnames[raw_idx]
-        with self._open_file(self._img_path, fname) as f:
+    def get_raw_image(self, subject, yid, pid):
+        yaw = self.yaw_list[yid]
+        pitch = self.pitch_list[pid]
+        render_path = os.path.join(self.UV_RENDER, subject, '%d_%d_%02d.jpg' % (yaw, pitch, 0))
+        # fname = self._image_fnames[raw_idx]
+        with self._open_file(self.RENDER, subject, render_path) as f:
             image = Image.open(f)
             if self.downsample_factor != 1:
                 width, height = image.size
@@ -171,10 +174,13 @@ class TrainDataset(Dataset):
         image = image.transpose(2, 0, 1)  # HWC => CHW
         return image
 
-    def get_densepose(self, raw_idx):
-        fname = self._image_fnames[raw_idx]
-        fname = f'{fname[:-4]}_densepose.png'
-        with self._open_file(self.POSE, fname) as f:
+    def get_densepose(self, subject, yid, pid):
+        # fname = self._image_fnames[raw_idx]
+        # fname = f'{fname[:-4]}_densepose.png'
+        yaw = self.yaw_list[yid]
+        pitch = self.pitch_list[pid]
+        pose_path = os.path.join(self.POSE, subject, '%d_%d_%02d.jpg' % (yaw, pitch, 0))
+        with self._open_file(self.POSE, subject, pose_path) as f:
             densepose = Image.open(f)
             if self.downsample_factor != 1:
                 width, height = densepose.size
@@ -186,10 +192,13 @@ class TrainDataset(Dataset):
             densepose = np.array(densepose)[:, :, 2:].transpose(2, 0, 1)
         return densepose.astype(np.float32)
 
-    def get_segm(self, raw_idx):
-        fname = self._image_fnames[raw_idx]
-        fname = f'{fname[:-4]}_segm.png'
-        with self._open_file(self.SEG, fname) as f:
+    def get_segm(self, subject, yid, pid):
+        # fname = self._image_fnames[raw_idx]
+        # fname = f'{fname[:-4]}_segm.png'
+        yaw = self.yaw_list[yid]
+        pitch = self.pitch_list[pid]
+        seg_path = os.path.join(self.POSE, subject, '%d_%d_%02d.jpg' % (yaw, pitch, 0))
+        with self._open_file(self.SEG, subject, seg_path) as f:
             segm = Image.open(f)
             if self.downsample_factor != 1:
                 width, height = segm.size
@@ -454,15 +463,20 @@ class TrainDataset(Dataset):
         # tmp = index // len(self.subjects)
         # yid = tmp % len(self.yaw_list)
         # pid = tmp // len(self.yaw_list)
-        image = self.get_raw_image(index)
-        pose = self.get_densepose(index)
-        segm = self.get_segm(index)
+        # image = self.get_raw_image(index)
+        # pose = self.get_densepose(index)
+        # segm = self.get_segm(index)
 
         info = self._image_fnames[index].split('.')[0].split['_']
         sid, yid, pid = int(info[0]), info[1], info[2]
 
+
         # name of the subject 'rp_xxxx_xxx'
         subject = self.subjects[sid]
+
+        image = self.get_raw_image(subject, yid, pid)
+        pose = self.get_densepose(subject, yid, pid)
+        segm = self.get_segm(subject, yid, pid)
         res = {
             'name': subject,
             'mesh_path': os.path.join(self.OBJ, subject + '.obj'),
